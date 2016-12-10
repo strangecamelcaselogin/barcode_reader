@@ -3,7 +3,7 @@ from copy import deepcopy as deepcopy
 from time import time
 #import threading
 
-#import numpy as np
+import numpy as np
 import cv2
 import scipy.signal as scs
 import matplotlib.pyplot as plt
@@ -229,18 +229,18 @@ def run():
         frames += 1
         fps = frames / (time() - start_time)
 
-        _, frame = cap.read()
+        _, frame = cap.read()  # Получаем ЦВЕТНОЙ кадр с камеры
         colored_frame = frame.copy()
         #colored_frame = cv2.flip(colored_frame, 1)  # Отзеркалить
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        #for i in range(7):
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Переводим в серый
+
         data = frame_analysis(frame, (width, high), lines, gc)
 
         if data is not None:
             print(human_barcode(data['barcode']))
             plot_data(data)
             cv2.waitKey(0)
-
             start_time = time()
             frames = 0
 
