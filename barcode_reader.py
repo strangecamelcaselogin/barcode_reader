@@ -1,8 +1,6 @@
-from collections import Counter  # , OrderedDict, namedtuple
-from copy import deepcopy as deepcopy
+from collections import Counter
 from time import time
 
-#  import numpy as np
 import cv2
 import scipy.signal as scs
 import matplotlib.pyplot as plt
@@ -13,8 +11,12 @@ from settings import *
 class BarcodeReader:
     def __init__(self):
         self.gc = self.gauss_core(k=15, sigma=1)
-        self.lines = []
+
         self.width, self.height = 0, 0
+        self.lines = []
+        self.lines_coords = []
+
+        #plt.ion()
 
     @staticmethod
     def gauss_core(k, sigma):
@@ -47,18 +49,68 @@ class BarcodeReader:
 
         return str_
 
+    def init_lines(self):
+        self.lines = [
+            ((0, round(self.height / 4)), (self.width, round(self.height / 4))),
+            ((0, round(2 * self.height / 4)), (self.width, round(2 * self.height / 4))),
+            ((0, round(3 * self.height / 4)), (self.width, round(3 * self.height / 4))),
+            ((0, 0), (self.width, self.height)),
+            ((0, self.height), (self.width, 0))
+        ]
+
+        for p1, p2 in self.lines:
+            self.lines_coords.append(self.get_line_coords(p1, p2))
+
     @staticmethod
-    def get_line(frame, size, p1=(0, 0), p2=(0, 0)):
-        # Получение линии с кадра
-        frame_width, frame_high = size
-        x1, y1 = p1
-        x2, y2 = p2
+    def get_line_coords(start, end):
+        """
+        Получаем координаты точек алгоритмом Брезенхейма.
+        """
 
-        if y1 == y2:
-            return deepcopy(frame[y1][x1:x2])
+        # Setup initial conditions
+        x1, y1 = start
+        x2, y2 = end
+        dx = x2 - x1
+        dy = y2 - y1
 
-        else:
-            return None
+        # Determine how steep the line is
+        is_steep = abs(dy) > abs(dx)
+
+        # Rotate line
+        if is_steep:
+            x1, y1 = y1, x1
+            x2, y2 = y2, x2
+
+        # Swap start and end points if necessary and store swap state
+        swapped = False
+        if x1 > x2:
+            x1, x2 = x2, x1
+            y1, y2 = y2, y1
+            swapped = True
+
+        # Recalculate differentials
+        dx = x2 - x1
+        dy = y2 - y1
+
+        # Calculate error
+        error = int(dx / 2.0)
+        ystep = 1 if y1 < y2 else -1
+
+        # Iterate over bounding box generating points between start and end
+        y = y1
+        points = []
+        for x in range(x1, x2 + 1):
+            coord = (y, x) if is_steep else (x, y)
+            points.append(coord)
+            error -= abs(dy)
+            if error < 0:
+                y += ystep
+                error += dx
+
+        # Reverse the list if the coordinates were swapped
+        if swapped:
+            points.reverse()
+        return points
 
     @staticmethod
     def get_derivative(line):
@@ -157,11 +209,14 @@ class BarcodeReader:
 
         frame -> line -> derivative -> raw_barcode -> barcode (нормированный) -> result
         """
-        size = self.width, self.height
-        wave_cnt = 0
+
         timer = time()
-        for p1, p2 in self.lines:
-            line = self.get_line(frame, size, p1, p2)
+
+        for line_index in range(len(self.lines)):
+            line = []
+            for x, y in self.lines_coords[line_index]:
+                line.append(frame[y, x])
+
             cnv_derivative = scs.convolve(self.get_derivative(line), self.gc, mode='same')
 
             threshold = DEF_THRESHOLD
@@ -175,10 +230,11 @@ class BarcodeReader:
                     wave_cnt = len(barcode)
 
                     if wave_cnt >= DEF_BARCODE_LEN:  # Если на данной итерации хотя бы 59 всплесков, то продолжим
-                        # print('{}: порог - {}, выбросов на raw - {}, выбросов norm - {}'.format(index, threshold,
-                        #                                                                        raw_wave_cnt, wave_cnt))
 
                         if debug:
+                            print('{}: порог - {}, выбросов на raw - {}, выбросов norm - {}'
+                                  .format(index, threshold, raw_wave_cnt, wave_cnt))
+
                             print('most_common:', m_common)
                             print('raw:', raw_barcode)
                             print('norm:', barcode)
@@ -191,10 +247,10 @@ class BarcodeReader:
                                     'result': result,
                                     'debug': dbg,
                                     'threshold': threshold,
-                                    'time': time() - timer}
+                                    'time': time() - timer,
+                                    'line_index': line_index}
 
                 threshold -= THRESHOLD_STEP
-                # print('{}: порог - {}, выбросов на raw - {}, выбросов norm - {}'.format(index, threshold, raw_wave_cnt, wave_cnt))
 
         return None
 
@@ -207,31 +263,42 @@ class BarcodeReader:
         if not ret:
             raise Exception('Capture device error.')
 
-        self.width, self.height = int(cap.get(3)), int(cap.get(4))
-        print('camera resolution: {}x{}'.format(self.width, self.height))
+        self.width, self.height = int(cap.get(3)) - 1, int(cap.get(4)) - 1
+        print('camera resolution: {}x{}'.format(self.width + 1, self.height + 1))
 
-        self.lines = [((0, round(self.height / 2)), (self.width, round(self.height / 2)))]
+        self.init_lines()
 
         start_time = time()
         fps = 0
         frame_cnt = 0
+
+        active_line = 0
+        #plot = plt.figure()
+        #plot_event = time()
         while cap.isOpened():
             _, frame = cap.read()  # Получаем ЦВЕТНОЙ кадр с камеры
-            colored_frame = cv2.flip(frame.copy(), 1)  # Отзеркалить
+            # cv2.flip(frame.copy(), 1)  # Отзеркалить
+            colored_frame = frame.copy()
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Переводим в серый
 
             data = self.frame_analysis(frame)
 
             if data is not None:
+                print('Номер поймавшей линии: {}'.format(data['line_index']))
                 print(self.barcode_human_repr(data['barcode']))
                 self.plot_data(data)
 
                 cv2.waitKey(0)
-
                 start_time = time()
 
-            for p1, p2 in self.lines:
-                cv2.line(colored_frame, p1, p2, color=[0, 0, 255])
+            for i in range(len(self.lines)):
+                p1, p2 = self.lines[i]
+                if i == active_line:
+                    line_color = WHITE
+                else:
+                    line_color = RED
+
+                cv2.line(colored_frame, p1, p2, color=line_color)
 
             cv2.putText(colored_frame, "FPS: {}".format(fps), (10, 20), cv2.FONT_HERSHEY_PLAIN,
                         fontScale=0.75, color=[0, 255, 255], lineType=cv2.LINE_AA)
@@ -241,10 +308,15 @@ class BarcodeReader:
             frame_cnt += 1
             fps = round(frame_cnt / (time() - start_time))
 
-            if cv2.waitKey(1) == 27:  # cv2,waitKey(1) & 0xFF == ord('q'):
+            key_code = cv2.waitKey(10)
+            if key_code == 27:
                 break
+            elif key_code == 2424832:
+                active_line -= 1
+            elif key_code == 2555904:
+                active_line += 1
 
-
+            active_line %= len(self.lines)
 
         cap.release()
         cv2.destroyAllWindows()
@@ -257,7 +329,7 @@ class BarcodeReader:
         self.width, self.height = len(img[0]), len(img)
         print('frame size: {}x{}\n'.format(self.width, self.height))
 
-        self.lines = [((0, round(self.height / 2)), (self.width, round(self.height / 2)))]
+        self.init_lines()
 
         data = self.frame_analysis(img, debug=True)
 
