@@ -194,11 +194,10 @@ class BarcodeReader:
 
     @staticmethod
     def barcode_read(barcode):
-        # Просмотреть длинну.
-        # Группы 101 01010 и 101.
+        # Проверить руппы 101 01010 и 101.
         return True
 
-    def frame_analysis(self, frame, debug=False):
+    def frame_analysis(self, frame, active_line_num, debug=False):
         """
         Перебираем переданный набор линий, строим для каждой производную,
         и опуская порог ищем хотя бы 59 всплесков на ней.
@@ -213,35 +212,43 @@ class BarcodeReader:
         timer = time()
 
         for line_index in range(len(self.lines)):
+            # Заполняем line значениями по вычесленным координатам
             line = []
             for x, y in self.lines_coords[line_index]:
                 line.append(frame[y, x])
 
+            # Считаем производную
             cnv_derivative = scs.convolve(self.get_derivative(line), self.gc, mode='same')
 
-            threshold = DEF_THRESHOLD
-            for index in range(DEF_TRY_CNT):
+            # Выделенная линия
+            act_line = [frame[y, x] for x, y in self.lines_coords[active_line_num]]
+            act_der = scs.convolve(self.get_derivative(act_line), self.gc, mode='same')
+
+            for index, threshold in enumerate(DEF_THRESHOLD_LIST):
                 raw_barcode, dbg = self.get_raw_barcode(cnv_derivative, threshold)
                 raw_wave_cnt = len(raw_barcode)
 
+                # Если на производной больше DEF_BARCODE_LEN всплесков
                 if raw_wave_cnt >= DEF_BARCODE_LEN:
 
                     barcode, m_common = self.barcode_normalize(raw_barcode)
                     wave_cnt = len(barcode)
 
-                    if wave_cnt >= DEF_BARCODE_LEN:  # Если на данной итерации хотя бы 59 всплесков, то продолжим
+                    # Если после нормализации их осталось столько же
+                    if wave_cnt >= DEF_BARCODE_LEN:
 
                         if debug:
                             print('{}: порог - {}, выбросов на raw - {}, выбросов norm - {}'
                                   .format(index, threshold, raw_wave_cnt, wave_cnt))
 
                             print('most_common:', m_common)
-                            print('raw:', raw_barcode)
-                            print('norm:', barcode)
+                            # print('raw:', raw_barcode)
+                            # print('norm:', barcode)
 
                         result = self.barcode_read(barcode)
                         if result:
-                            return {'line': line,
+                            return {'catch': True,
+                                    'line': line,
                                     'derivative': cnv_derivative,
                                     'barcode': barcode,
                                     'result': result,
@@ -250,9 +257,12 @@ class BarcodeReader:
                                     'time': time() - timer,
                                     'line_index': line_index}
 
-                threshold -= THRESHOLD_STEP
-
-        return None
+        act_line = [frame[y, x] for x, y in self.lines_coords[active_line_num]]
+        act_der = scs.convolve(self.get_derivative(act_line), self.gc, mode='same')
+        return {'catch': False,
+                'act_line': act_line,
+                'act_der': act_der
+                }
 
     def run(self):
         # Вызываем frame_analysis для каждого кадра,
@@ -272,28 +282,42 @@ class BarcodeReader:
         fps = 0
         frame_cnt = 0
 
-        active_line = 0
-        #plot = plt.figure()
-        #plot_event = time()
+        active_line_num = 0
+        plot_ = plt.figure()
+        plt.ion()
+
+        plot_event = time()
+
         while cap.isOpened():
             _, frame = cap.read()  # Получаем ЦВЕТНОЙ кадр с камеры
             # cv2.flip(frame.copy(), 1)  # Отзеркалить
             colored_frame = frame.copy()
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Переводим в серый
 
-            data = self.frame_analysis(frame)
+            data = self.frame_analysis(frame, active_line_num, debug=False)
 
-            if data is not None:
+            if data['catch']:
                 print('Номер поймавшей линии: {}'.format(data['line_index']))
                 print(self.barcode_human_repr(data['barcode']))
-                self.plot_data(data)
 
+                self.plot_data(data)
                 cv2.waitKey(0)
-                start_time = time()
+
+                start_time = time() - 0.1
+            else:
+                pass
+
+            if time() >= plot_event + 0.5:
+                plot_event = time()
+                plot_.clear()
+                plt.plot(data['act_line'])
+                plt.plot(data['act_der'])
+                plt.draw()
+                plt.pause(0.0000000000001)
 
             for i in range(len(self.lines)):
                 p1, p2 = self.lines[i]
-                if i == active_line:
+                if i == active_line_num:
                     line_color = WHITE
                 else:
                     line_color = RED
@@ -309,29 +333,30 @@ class BarcodeReader:
             fps = round(frame_cnt / (time() - start_time))
 
             key_code = cv2.waitKey(10)
-            if key_code == 27:
+            if key_code == 27:  # Escape
                 break
-            elif key_code == 2424832:
-                active_line -= 1
-            elif key_code == 2555904:
-                active_line += 1
+            elif key_code == 2424832:  # Left
+                active_line_num -= 1
+            elif key_code == 2555904:  # Right
+                active_line_num += 1
 
-            active_line %= len(self.lines)
+            active_line_num %= len(self.lines)
 
         cap.release()
         cv2.destroyAllWindows()
+        plt.close(plot_)
 
     def one_frame(self, filename):
 
         img = cv2.imread(filename, 0)  # 0 - grayscale
         cv2.namedWindow("frame", cv2.WINDOW_KEEPRATIO)
 
-        self.width, self.height = len(img[0]), len(img)
-        print('frame size: {}x{}\n'.format(self.width, self.height))
+        self.width, self.height = len(img[0]) - 1, len(img) - 1
+        print('frame size: {}x{}\n'.format(self.width + 1, self.height + 1))
 
         self.init_lines()
 
-        data = self.frame_analysis(img, debug=True)
+        data = self.frame_analysis(img, 0, debug=True)
 
         if data:
             print('SUCCESS')
@@ -344,7 +369,9 @@ class BarcodeReader:
 
             cv2.imshow('frame', img)
             self.plot_data(data)
-            cv2.destroyAllWindows()
+            cv2.waitKey(0)
 
         else:
             print('Штрихкод не найден')
+
+        cv2.destroyAllWindows()
